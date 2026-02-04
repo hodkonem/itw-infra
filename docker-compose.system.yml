@@ -1,0 +1,199 @@
+name: itw-system
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: itw-postgres
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-user_service}
+      POSTGRES_USER: ${POSTGRES_USER:-user_service_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-user_service_password}
+    volumes:
+      - itw_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user_service_user} -d ${POSTGRES_DB:-user_service} -h 127.0.0.1 -p 5432" ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    networks:
+      - itw-net
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: itw-zookeeper
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${ZOOKEEPER_PORT:-2181}:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - itw_zk_data:/var/lib/zookeeper/data
+      - itw_zk_log:/var/lib/zookeeper/log
+    healthcheck:
+      test: [ "CMD-SHELL", "bash -lc 'exec 3<>/dev/tcp/127.0.0.1/2181'" ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    networks:
+      - itw-net
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: itw-kafka
+    restart: unless-stopped
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${KAFKA_PORT:-9092}:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,PLAINTEXT_INTERNAL://0.0.0.0:29092"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://${KAFKA_ADVERTISED_HOST:-localhost}:${KAFKA_PORT:-9092},PLAINTEXT_INTERNAL://kafka:29092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT_INTERNAL"
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: [ "CMD-SHELL", "kafka-broker-api-versions --bootstrap-server 127.0.0.1:9092 >/dev/null 2>&1" ]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 40s
+    networks:
+      itw-net:
+        aliases:
+          - kafka
+
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    container_name: itw-mailhog
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${MAILHOG_UI_PORT:-8025}:8025"
+      - "127.0.0.1:${MAILHOG_SMTP_PORT:-1025}:1025"
+    networks:
+      - itw-net
+
+  config-server:
+    image: itw/config-server:local
+    build:
+      context: ../config-server
+    container_name: itw-config-server
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${CONFIG_SERVER_PORT:-8888}:8888"
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      GIT_USERNAME: ${GIT_USERNAME}
+      GIT_TOKEN: ${GIT_TOKEN}
+    networks:
+      - itw-net
+
+  discovery-service:
+    image: itw/discovery-service:local
+    build:
+      context: ../discovery-service
+    container_name: itw-discovery-service
+    restart: unless-stopped
+    depends_on:
+      config-server:
+        condition: service_started
+    ports:
+      - "127.0.0.1:${DISCOVERY_PORT:-8761}:8761"
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      CONFIG_SERVER_URL: http://config-server:8888
+    networks:
+      - itw-net
+
+  api-gateway:
+    image: itw/api-gateway:local
+    build:
+      context: ../api-gateway
+    container_name: itw-api-gateway
+    restart: unless-stopped
+    depends_on:
+      discovery-service:
+        condition: service_started
+      config-server:
+        condition: service_started
+    ports:
+      - "127.0.0.1:${GATEWAY_PORT:-8080}:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      CONFIG_SERVER_URL: http://config-server:8888
+      EUREKA_URL: http://discovery-service:8761/eureka
+    networks:
+      - itw-net
+
+  user-service:
+    image: itw/user-service:local
+    build:
+      context: ../user-service
+    container_name: itw-user-service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      discovery-service:
+        condition: service_started
+      config-server:
+        condition: service_started
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      CONFIG_SERVER_URL: http://config-server:8888
+      EUREKA_URL: http://discovery-service:8761/eureka
+
+      # ВАЖНО: user-service читает DB_* из config-repo
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-user_service}
+      DB_USER: ${POSTGRES_USER:-user_service_user}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-user_service_password}
+
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    networks:
+      - itw-net
+
+  notification-service:
+    image: itw/notification-service:local
+    build:
+      context: ../notification-service
+    container_name: itw-notification-service
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      discovery-service:
+        condition: service_started
+      config-server:
+        condition: service_started
+      mailhog:
+        condition: service_started
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      CONFIG_SERVER_URL: http://config-server:8888
+      EUREKA_URL: http://discovery-service:8761/eureka
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      MAIL_HOST: mailhog
+      MAIL_PORT: 1025
+    networks:
+      - itw-net
+
+networks:
+  itw-net:
+    name: ${DOCKER_NETWORK:-itw-dev-net}
