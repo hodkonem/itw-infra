@@ -96,8 +96,10 @@ services:
       - "127.0.0.1:${CONFIG_SERVER_PORT:-8888}:8888"
     environment:
       SPRING_PROFILES_ACTIVE: docker
-      GIT_USERNAME: ${GIT_USERNAME}
-      GIT_TOKEN: ${GIT_TOKEN}
+      SPRING_CLOUD_CONFIG_SERVER_GIT_URI: https://github.com/hodkonem/config-repo.git
+      SPRING_CLOUD_CONFIG_SERVER_GIT_DEFAULT_LABEL: develop
+      SPRING_CLOUD_CONFIG_SERVER_GIT_USERNAME: ${GIT_USERNAME}
+      SPRING_CLOUD_CONFIG_SERVER_GIT_PASSWORD: ${GIT_TOKEN}
     networks:
       - itw-net
 
@@ -158,7 +160,6 @@ services:
       CONFIG_SERVER_URL: http://config-server:8888
       EUREKA_URL: http://discovery-service:8761/eureka
 
-      # ВАЖНО: user-service читает DB_* из config-repo
       DB_HOST: postgres
       DB_PORT: 5432
       DB_NAME: ${POSTGRES_DB:-user_service}
@@ -197,3 +198,8 @@ services:
 networks:
   itw-net:
     name: ${DOCKER_NETWORK:-itw-dev-net}
+
+volumes:
+  itw_pg_data:
+  itw_zk_data:
+  itw_zk_log:
